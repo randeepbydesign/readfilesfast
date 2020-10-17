@@ -22,6 +22,8 @@ import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 import static com.randeepbydesign.util.Util.convertRowToList;
 import static com.randeepbydesign.util.Util.hasData;
+import static java.util.Optional.empty;
+import static java.util.Optional.of;
 
 @Slf4j
 public class ExcelFileDataSource<T> extends DataSource<T> {
@@ -51,11 +53,14 @@ public class ExcelFileDataSource<T> extends DataSource<T> {
     public static final RowKeySupplier FirstCell = (Object[] oa) -> oa[0];
 
     private final static AtomicInteger counter = new AtomicInteger(0);
-
-    /** Key supplier that marks no groupable rows. */
     public static final RowKeySupplier EveryRowUnique = oa -> counter.getAndIncrement();
 
-    /** Identifies a particular column as the key */
+    /**
+     * Treats every row individually (so if a group is submitted just return 1st entry) otherwise empty
+     */
+    public static final RowGroupMapperFunction<Object[]> identity =
+            (List<Object[]> oa) -> oa.size() > 0 ? of(oa.get(0)) : empty();
+
     public static RowKeySupplier RowKeyIsCellAt(final int cellIndex) {
         return (Object[] oa) -> oa[cellIndex];
     }
@@ -64,12 +69,12 @@ public class ExcelFileDataSource<T> extends DataSource<T> {
      * @param rowDataMapper Maps a list of rows to a single data type
      * @param rowKeySupplier The way we identify how to group rows together
      */
-    public ExcelFileDataSource(String filename, Function<List<Object[]>, Optional<T>> rowDataMapper,
+    public ExcelFileDataSource(String filename, RowGroupMapperFunction<T> rowDataMapper,
             RowKeySupplier rowKeySupplier) throws Exception {
         this(filename, rowDataMapper, rowKeySupplier, w -> Collections.singletonList(w.getSheetAt(0)));
     }
 
-    public ExcelFileDataSource(String filename, RowGroupMapperFunction rowDataMapper,
+    public ExcelFileDataSource(String filename, RowGroupMapperFunction<T> rowDataMapper,
             RowKeySupplier rowKeySupplier, int... sheetIndices) throws Exception {
         this(filename, rowDataMapper, rowKeySupplier, w -> Arrays.stream(sheetIndices)
                 .mapToObj(w::getSheetAt)
@@ -84,7 +89,7 @@ public class ExcelFileDataSource<T> extends DataSource<T> {
                         .collect(Collectors.toList()));
     }
 
-    private ExcelFileDataSource(String filename, Function<List<Object[]>, Optional<T>> rowDataMapper,
+    private ExcelFileDataSource(String filename, RowGroupMapperFunction<T> rowDataMapper,
             Function<Object[], Object> rowKeySupplier, Function<Workbook, List<Sheet>> sheetMapper) throws Exception {
 
         File file = new File(filename);
@@ -109,10 +114,36 @@ public class ExcelFileDataSource<T> extends DataSource<T> {
 
     @Override
     public List<T> deserializeList(Class<T> classType) {
+        if (true) {
+            return deserializeSheetsList(classType);
+        }
         return excelSheet.stream()
                 .map(sheet -> deserializeList(sheet))
                 .flatMap(List::stream)
                 .collect(Collectors.toList());
+    }
+
+
+    public List<T> deserializeSheetsList(Class<T> classType) {
+        List<Object[]> allSheetsRows = excelSheet.stream()
+                .map(sheet -> deserializeGenericList(sheet))
+                .flatMap(List::stream)
+                .collect(Collectors.toList());
+        Collection<List<Object[]>> rowGroups = groupRows(allSheetsRows);
+        return rowGroups.stream()
+                .map(rowDataMapper)
+                .filter(Optional::isPresent).map(Optional::get)
+                .collect(Collectors.toList());
+    }
+
+    private List<Object[]> deserializeGenericList(Sheet sheet) {
+        List<Object[]> rowsAsObject = new ArrayList<>();
+        Iterator<Row> rowIterator = sheet.rowIterator();
+        rowIterator.next();
+        while (rowIterator.hasNext()) {
+            rowsAsObject.add(convertRowToList(rowIterator.next()));
+        }
+        return rowsAsObject;
     }
 
     private List<T> deserializeList(Sheet sheet) {
@@ -149,3 +180,4 @@ public class ExcelFileDataSource<T> extends DataSource<T> {
     }
 
 }
+

@@ -24,13 +24,11 @@ public abstract class DataSource<T> {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
-
     }
 
     public abstract List<T> deserializeList(Class<T> classType);
 
     public static <T> T deserializeFile(File inFile) {
-
         try {
             FileInputStream fin = new FileInputStream(inFile);
             ObjectInputStream ois = new ObjectInputStream(fin);

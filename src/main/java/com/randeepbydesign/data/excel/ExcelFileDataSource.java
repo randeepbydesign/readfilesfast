@@ -1,5 +1,7 @@
-package com.randeepbydesign.data;
+package com.randeepbydesign.data.excel;
 
+import com.randeepbydesign.data.DataSource;
+import com.randeepbydesign.data.RowGroupMapperFunction;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -7,40 +9,51 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
+import static com.randeepbydesign.util.Util.asString;
 import static com.randeepbydesign.util.Util.convertRowToList;
 import static com.randeepbydesign.util.Util.hasData;
+import static java.util.Collections.singletonList;
 import static java.util.Optional.empty;
 import static java.util.Optional.of;
 
 @Slf4j
 public class ExcelFileDataSource<T> extends DataSource<T> {
 
+    private static final RowGroupMapperFunction<Map<String, String>> mapTransformer = (RowGroup singleRowGroup) -> {
+        if (!singleRowGroup.getHeaderRow().isPresent()) {
+            throw new RuntimeException("Headers required to render Map");
+        }
+        Object[] headers = singleRowGroup.getHeaderRow().get();
+        return Optional.of(IntStream.rangeClosed(0, headers.length).boxed()
+                .collect(Collectors.toMap(
+                        i -> asString(headers[i]),
+                        i -> asString(singleRowGroup.getGroupedRows().get(0)[i])))
+        );
+    };
+
     List<Sheet> excelSheet;
 
-    Function<List<Object[]>, Optional<T>> rowDataMapper;
+    RowGroupMapperFunction<T> rowDataMapper;
 
     Function<Object[], Object> rowKeySupplier;
-
-    /**
-     * Takes a group of rows that are collected based on a key value. A row is defined as an Object array. In the event
-     * the row group input is not valid an emptyOptional can be returned
-     */
-    public interface RowGroupMapperFunction<T> extends Function<List<Object[]>, Optional<T>> {
-
-    }
 
     /**
      * A transformation to extract a grouping key from a Row. This can be used to map excel rows based on a common
@@ -53,16 +66,21 @@ public class ExcelFileDataSource<T> extends DataSource<T> {
     public static final RowKeySupplier FirstCell = (Object[] oa) -> oa[0];
 
     private final static AtomicInteger counter = new AtomicInteger(0);
+
     public static final RowKeySupplier EveryRowUnique = oa -> counter.getAndIncrement();
 
     /**
      * Treats every row individually (so if a group is submitted just return 1st entry) otherwise empty
      */
     public static final RowGroupMapperFunction<Object[]> identity =
-            (List<Object[]> oa) -> oa.size() > 0 ? of(oa.get(0)) : empty();
+            oa -> oa.getGroupedRows().size() > 0 ? of(oa.getGroupedRows().get(0)) : empty();
 
     public static RowKeySupplier RowKeyIsCellAt(final int cellIndex) {
         return (Object[] oa) -> oa[cellIndex];
+    }
+
+    public ExcelFileDataSource(String filename) throws Exception {
+        this(filename, mapTransformer, ExcelFileDataSource.EveryRowUnique);
     }
 
     /**
@@ -71,7 +89,7 @@ public class ExcelFileDataSource<T> extends DataSource<T> {
      */
     public ExcelFileDataSource(String filename, RowGroupMapperFunction<T> rowDataMapper,
             RowKeySupplier rowKeySupplier) throws Exception {
-        this(filename, rowDataMapper, rowKeySupplier, w -> Collections.singletonList(w.getSheetAt(0)));
+        this(filename, rowDataMapper, rowKeySupplier, w -> singletonList(w.getSheetAt(0)));
     }
 
     public ExcelFileDataSource(String filename, RowGroupMapperFunction<T> rowDataMapper,
@@ -114,60 +132,54 @@ public class ExcelFileDataSource<T> extends DataSource<T> {
 
     @Override
     public List<T> deserializeList(Class<T> classType) {
-        if (true) {
-            return deserializeSheetsList(classType);
-        }
-        return excelSheet.stream()
-                .map(sheet -> deserializeList(sheet))
-                .flatMap(List::stream)
-                .collect(Collectors.toList());
+        return deserializeSheetsList(classType);
     }
 
 
     public List<T> deserializeSheetsList(Class<T> classType) {
-        List<Object[]> allSheetsRows = excelSheet.stream()
+        List<RowGroup> allSheetsRows = excelSheet.stream()
                 .map(sheet -> deserializeGenericList(sheet))
-                .flatMap(List::stream)
                 .collect(Collectors.toList());
-        Collection<List<Object[]>> rowGroups = groupRows(allSheetsRows);
+        List<RowGroup> rowGroups = groupRows(allSheetsRows);
         return rowGroups.stream()
-                .map(rowDataMapper)
+                .map(rowDataMapper::apply)
                 .filter(Optional::isPresent).map(Optional::get)
                 .collect(Collectors.toList());
     }
 
-    private List<Object[]> deserializeGenericList(Sheet sheet) {
+    /**
+     * @return all the rows of the sheet grouped together
+     */
+    private RowGroup deserializeGenericList(Sheet sheet) {
         List<Object[]> rowsAsObject = new ArrayList<>();
         Iterator<Row> rowIterator = sheet.rowIterator();
-        rowIterator.next();
+        Object[] headerRow = convertRowToList(rowIterator.next());
         while (rowIterator.hasNext()) {
             rowsAsObject.add(convertRowToList(rowIterator.next()));
         }
-        return rowsAsObject;
+        return new RowGroup(headerRow, rowsAsObject);
     }
 
-    private List<T> deserializeList(Sheet sheet) {
-        log.info("Processing sheet {}", sheet.getSheetName());
-        List<Object[]> rowsAsObject = new ArrayList<>();
-        Iterator<Row> rowIterator = sheet.rowIterator();
-        rowIterator.next();
-        while (rowIterator.hasNext()) {
-            rowsAsObject.add(convertRowToList(rowIterator.next()));
+    protected List<RowGroup> groupRows(List<RowGroup> sheets) {
+        if (rowKeySupplier == null || sheets.isEmpty()) {
+            return sheets;
         }
-        Collection<List<Object[]>> rowGroups = groupRows(rowsAsObject);
-
-        return rowGroups.stream()
-                .map(rowDataMapper)
-                .filter(Optional::isPresent).map(Optional::get)
-                .collect(Collectors.toList());
-    }
-
-    private Collection<List<Object[]>> groupRows(List<Object[]> rowsAsObject) {
-        return rowsAsObject.stream()
+        Optional<Object[]> header = sheets.get(0).getHeaderRow();
+        return sheets.stream()
+                .map(RowGroup::getGroupedRows).flatMap(Collection::stream)
                 .filter(Objects::nonNull)
-                .filter(row -> hasData(rowKeySupplier.apply(row)))
+                .filter(row -> {
+                    try {
+                        return hasData(rowKeySupplier.apply(row));
+                    } catch (Exception e) {
+                        log.error("Unable to process row", e);
+                        return false;
+                    }
+                })
                 .collect(Collectors.groupingBy(rowKeySupplier))
-                .values();
+                .values().stream()
+                .map(la -> new RowGroup(header.orElse(null), la))
+                .collect(Collectors.toList());
     }
 
     public void close() {
